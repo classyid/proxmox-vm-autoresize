@@ -1,48 +1,86 @@
 #!/bin/bash
 
 # ==========================================
-# Script Auto-Expand Storage LVM (Ubuntu)
+# Script Auto-Expand Storage (Smart Detect)
 # ==========================================
 
-# Konfigurasi Device (Berdasarkan setup server Anda)
-DISK="/dev/sda"
-PART_NUM="3"
-PARTITION="${DISK}${PART_NUM}"
-LV_PATH="/dev/mapper/ubuntu--vg-ubuntu--lv"
-
-# Cek apakah dijalankan sebagai root
+# Cek Root
 if [ "$EUID" -ne 0 ]; then
-  echo "❌ Error: Harap jalankan script ini sebagai root (sudo)."
+  echo "❌ Error: Harap jalankan sebagai root."
   exit 1
 fi
 
-echo "=== 🚀 Memulai Proses Expand Storage ==="
-echo "Target Disk: $DISK"
-echo "Target LVM : $LV_PATH"
-echo "----------------------------------------"
+echo "=== 🔍 Memeriksa Lingkungan Sistem ==="
 
-# Langkah 1: Deteksi perubahan ukuran disk (Growpart)
-echo "[1/4] Memperbesar partisi fisik ($PARTITION)..."
-# growpart terkadang return non-zero jika tidak ada perubahan, kita tangkap outputnya
-OUTPUT_GP=$(growpart "$DISK" "$PART_NUM" 2>&1)
-if [[ $? -eq 0 ]]; then
-    echo "✅ Partisi berhasil diperbesar."
-else
-    echo "⚠️ Info: $OUTPUT_GP"
+# Deteksi Root Filesystem
+ROOT_DEV=$(findmnt / -o SOURCE -n)
+echo "Root Device terdeteksi: $ROOT_DEV"
+
+# Cek apakah ini Loop device (Indikasi LXC Container)
+if [[ "$ROOT_DEV" == *"/dev/loop"* ]]; then
+    echo "⚠️  Terdeteksi sistem berjalan pada Loop Device (Kemungkinan LXC Container)."
+    echo "ℹ️  Pada LXC, partisi dan LVM diatur oleh Host."
+    echo "🔄 Mencoba resize filesystem langsung..."
+    
+    resize2fs "$ROOT_DEV"
+    
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Resize Filesystem LXC Berhasil!"
+    else
+        echo "❌ Gagal. Pastikan Anda sudah menambah ukuran disk via Proxmox GUI."
+    fi
+    
+    echo "=== Selesai ==="
+    df -h /
+    exit 0
 fi
 
-# Langkah 2: Update Physical Volume LVM
-echo "[2/4] Mengupdate LVM Physical Volume..."
+# --- BAGIAN BAWAH INI HANYA UNTUK VM BIASA (NON-LXC) ---
+
+echo "=== 🛠️ Memeriksa Kelengkapan Tools (VM) ==="
+
+# Cek dan Install growpart
+if ! command -v growpart &> /dev/null; then
+    echo "📦 Menginstall cloud-guest-utils..."
+    apt-get update && apt-get install -y cloud-guest-utils
+fi
+
+# Cek dan Install LVM
+if ! command -v lvextend &> /dev/null; then
+    echo "📦 Menginstall lvm2..."
+    apt-get install -y lvm2
+fi
+
+# Konfigurasi LVM Default Ubuntu
+DISK="/dev/sda"
+PART_NUM="3"
+PARTITION="${DISK}${PART_NUM}"
+LV_PATH=$(lvdisplay | grep "LV Path" | awk '{print $3}' | head -n 1)
+
+if [ -z "$LV_PATH" ]; then
+    echo "❌ Tidak dapat menemukan Logical Volume LVM otomatis."
+    echo "   Silakan cek manual dengan 'lsblk'."
+    exit 1
+fi
+
+echo "Target Disk: $DISK"
+echo "Target LVM : $LV_PATH"
+
+# 1. Growpart
+echo "[1/4] Growpart..."
+growpart "$DISK" "$PART_NUM"
+
+# 2. PV Resize
+echo "[2/4] PV Resize..."
 pvresize "$PARTITION"
 
-# Langkah 3: Extend Logical Volume
-echo "[3/4] Mengambil semua free space ke Logical Volume..."
+# 3. LV Extend
+echo "[3/4] LV Extend..."
 lvextend -l +100%FREE "$LV_PATH"
 
-# Langkah 4: Resize Filesystem (ext4)
-echo "[4/4] Resize Filesystem agar terbaca OS..."
+# 4. Resize FS
+echo "[4/4] Resize Filesystem..."
 resize2fs "$LV_PATH"
 
-echo "----------------------------------------"
-echo "=== 🎉 Selesai! Berikut kapasitas baru: ==="
+echo "=== 🎉 Selesai! ==="
 df -h /
